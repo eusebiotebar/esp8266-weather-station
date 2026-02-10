@@ -1,0 +1,22 @@
+{
+  "name": "esp8266-weather-station-lib",
+  "version": "1.0.0",
+  "description": "Weather station library",
+  "keywords": "weather,wifi,esp8266",
+  "repository": {
+    "type": "git"
+  },
+  "authors": [
+    {
+      "name": "ThingPulse"
+    }
+  ],
+  "frameworks": "arduino",
+  "build": {
+    "srcFilter": [
+      "+<*.cpp>",
+      "+<*.h>",
+      "-<*>"
+    ]
+  }
+}

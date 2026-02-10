@@ -31,8 +31,16 @@ See more at https://thingpulse.com
 #else
 #include <WiFi.h>
 #endif
-#include <ESPHTTPClient.h>
+#include <ESP8266HTTPClient.h>
 #include <JsonListener.h>
+
+#include <ArduinoOTA.h>
+#include <WiFiManager.h>
+#include <Adafruit_Sensor.h>
+#include <simpleDSTadjust.h>
+#include <DHT.h>
+#include <DHT_U.h>
+#include <Ticker.h>
 
 // time
 #include <time.h>                       // time() ctime()
@@ -45,17 +53,36 @@ See more at https://thingpulse.com
 #include "OpenWeatherMapForecast.h"
 #include "WeatherStationFonts.h"
 #include "WeatherStationImages.h"
-
+#include "DSEG7Classic-BoldFont.h"
 
 /***************************
  * Begin Settings
  **************************/
 
 // WIFI
-const char* WIFI_SSID = "yourssid";
-const char* WIFI_PWD = "yourpassw0rd";
+// const char* WIFI_SSID = "yourssid";
+// const char* WIFI_PWD = "yourpassw0rd";
 
-#define TZ              2       // (utc+) TZ in hours
+// Initialize the temperature/ humidity sensor
+
+// DHT Settings
+#define DHTPIN D1 // NodeMCU
+#define DHTTYPE DHT22   // DHT 22  (AM2302), AM2321
+#define DHTTEXT "DHT22"
+
+DHT dht(DHTPIN, DHTTYPE);
+float humidity = 0.0;
+float temperature = 0.0;
+// flag changed in the ticker function every 1 minute
+bool readyForDHTUpdate = false;
+
+char FormattedTemperature[10];
+char FormattedHumidity[10];
+
+#define HOSTNAME "ESP8266-OTA-"
+#define NTP_SERVERS "us.pool.ntp.org", "time.nist.gov", "pool.ntp.org"
+#define STYLE_24HR
+#define TZ              0       // (utc+) TZ in hours
 #define DST_MN          60      // use 60mn for summer time in some countries
 
 // Setup
@@ -64,8 +91,8 @@ const int UPDATE_INTERVAL_SECS = 20 * 60; // Update every 20 minutes
 // Display Settings
 const int I2C_DISPLAY_ADDRESS = 0x3c;
 #if defined(ESP8266)
-const int SDA_PIN = D3;
-const int SDC_PIN = D4;
+const int SDA_PIN = D5;
+const int SDC_PIN = D6;
 #else
 const int SDA_PIN = 5; //D3;
 const int SDC_PIN = 4; //D4;
@@ -75,15 +102,16 @@ const int SDC_PIN = 4; //D4;
 // OpenWeatherMap Settings
 // Sign up here to get an API key:
 // https://docs.thingpulse.com/how-tos/openweathermap-key/
-String OPEN_WEATHER_MAP_APP_ID = "XXX";
+String OPEN_WEATHER_MAP_APP_ID = "3bec5c63928fb399617fc58fa2b5c81a";
 /*
 Use the OWM GeoCoder API to find lat/lon for your city: https://openweathermap.org/api/geocoding-api
 Or use any other geocoding service.
 Or go to https://openweathermap.org, search for your city and monitor the calls in the browser dev console :)
  */
-// Example: Zurich, Switzerland
-float OPEN_WEATHER_MAP_LOCATION_LAT = 47.3667;
-float OPEN_WEATHER_MAP_LOCATION_LON = 8.55;
+// Example: Leganés, Switzerland
+// https://api.openweathermap.org/geo/1.0/direct?q=Legan%C3%A9s,28918&limit=5&appid=3bec5c63928fb399617fc58fa2b5c81a
+float OPEN_WEATHER_MAP_LOCATION_LAT = 40.3281942;
+float OPEN_WEATHER_MAP_LOCATION_LON = -3.76527;
 
 // Pick a language code from this list:
 // Arabic - ar, Bulgarian - bg, Catalan - ca, Czech - cz, German - de, Greek - el,
@@ -93,7 +121,7 @@ float OPEN_WEATHER_MAP_LOCATION_LON = 8.55;
 // Portuguese - pt, Romanian - ro, Russian - ru, Swedish - se, Slovak - sk,
 // Slovenian - sl, Spanish - es, Turkish - tr, Ukrainian - ua, Vietnamese - vi,
 // Chinese Simplified - zh_cn, Chinese Traditional - zh_tw.
-String OPEN_WEATHER_MAP_LANGUAGE = "de";
+String OPEN_WEATHER_MAP_LANGUAGE = "es";
 const uint8_t MAX_FORECASTS = 4;
 
 const boolean IS_METRIC = true;
@@ -120,21 +148,30 @@ OpenWeatherMapForecast forecastClient;
 #define TZ_SEC          ((TZ)*3600)
 #define DST_SEC         ((DST_MN)*60)
 time_t now;
+struct dstRule StartRule = {"CEST", Last, Sun, Mar, 2, 3600}; // Central European Summer Time = UTC/GMT +2 hours
+struct dstRule EndRule = {"CET", Last, Sun, Oct, 2, 0};   
+
+simpleDSTadjust dstAdjusted(StartRule, EndRule);
 
 // flag changed in the ticker function every 10 minutes
 bool readyForWeatherUpdate = false;
 
 String lastUpdate = "--";
 
+Ticker ticker;
+
 long timeSinceLastWUpdate = 0;
 
 //declaring prototypes
+void configModeCallback (WiFiManager *myWiFiManager);
 void drawProgress(OLEDDisplay *display, int percentage, String label);
+void drawOtaProgress(unsigned int, unsigned int);
 void updateData(OLEDDisplay *display);
 void drawDateTime(OLEDDisplay *display, OLEDDisplayUiState* state, int16_t x, int16_t y);
 void drawCurrentWeather(OLEDDisplay *display, OLEDDisplayUiState* state, int16_t x, int16_t y);
 void drawForecast(OLEDDisplay *display, OLEDDisplayUiState* state, int16_t x, int16_t y);
 void drawForecastDetails(OLEDDisplay *display, int x, int y, int dayIndex);
+void drawIndoor(OLEDDisplay *display, OLEDDisplayUiState* state, int16_t x, int16_t y);
 void drawHeaderOverlay(OLEDDisplay *display, OLEDDisplayUiState* state);
 void setReadyForWeatherUpdate();
 
@@ -142,12 +179,23 @@ void setReadyForWeatherUpdate();
 // Add frames
 // this array keeps function pointers to all frames
 // frames are the single views that slide from right to left
-FrameCallback frames[] = { drawDateTime, drawCurrentWeather, drawForecast };
-int numberOfFrames = 3;
+FrameCallback frames[] = { drawDateTime, drawCurrentWeather, drawIndoor, drawForecast };
+int numberOfFrames = 4;
 
 OverlayCallback overlays[] = { drawHeaderOverlay };
 int numberOfOverlays = 1;
 
+String ESPChipID(void) {
+#if defined(ESP8266)
+  return String(ESP.getChipId(), HEX);
+#else
+  uint64_t EspChipID = ESP.getEfuseMac();
+  char chipID[14];
+  sprintf(chipID, "%04X%08X", (uint16_t)(EspChipID >> 32), (uint32_t)EspChipID);
+  return chipID;
+
+#endif
+}
 void setup() {
   Serial.begin(115200);
   Serial.println();
@@ -158,12 +206,30 @@ void setup() {
   display.clear();
   display.display();
 
-  //display.flipScreenVertically();
+  // display.flipScreenVertically();
   display.setFont(ArialMT_Plain_10);
   display.setTextAlignment(TEXT_ALIGN_CENTER);
   display.setContrast(255);
 
-  WiFi.begin(WIFI_SSID, WIFI_PWD);
+   //WiFiManager
+  //Local intialization. Once its business is done, there is no need to keep it around
+  WiFiManager wifiManager;
+  // Uncomment for testing wifi manager
+  //wifiManager.resetSettings();
+  wifiManager.setAPCallback(configModeCallback);
+
+  //or use this for auto generated name ESP + ChipID
+  wifiManager.autoConnect();
+
+  //Manual Wifi
+  //WiFi.begin(WIFI_SSID, WIFI_PWD);
+  String hostname(HOSTNAME);
+  hostname += ESPChipID();
+#if defined(ESP8266)
+  WiFi.hostname(hostname);
+#else
+  MDNS.begin((char *)&hostname);
+#endif
 
   int counter = 0;
   while (WiFi.status() != WL_CONNECTED) {
@@ -179,7 +245,7 @@ void setup() {
     counter++;
   }
   // Get time from network time service
-  configTime(TZ_SEC, DST_SEC, "pool.ntp.org");
+  configTime(TZ_SEC, DST_SEC, NTP_SERVERS);
 
   ui.setTargetFPS(30);
 
@@ -189,7 +255,7 @@ void setup() {
   // You can change this to
   // TOP, LEFT, BOTTOM, RIGHT
   ui.setIndicatorPosition(BOTTOM);
-
+//  ui.disableIndicator();
   // Defines where the first frame is located in the bar.
   ui.setIndicatorDirection(LEFT_RIGHT);
 
@@ -203,11 +269,27 @@ void setup() {
 
   // Inital UI takes care of initalising the display too.
   ui.init();
+  // Ensure orientation after ui.init()
+  display.flipScreenVertically();
+
+  // Initialize DHT sensor
+  Serial.println("Initializing DHT22 sensor on pin D1...");
+  dht.begin();
+  delay(500); // Give sensor time to stabilize
+  Serial.println("DHT22 sensor initialized");
+
+    // Setup OTA
+  Serial.println("Hostname: " + hostname);
+  ArduinoOTA.setHostname((const char *)hostname.c_str());
+  ArduinoOTA.onProgress(drawOtaProgress);
+  ArduinoOTA.begin();
 
   Serial.println("");
 
   updateData(&display);
-
+  
+  ticker.attach(UPDATE_INTERVAL_SECS, setReadyForWeatherUpdate);
+  ticker.attach(60, setReadyForDHTUpdate);
 }
 
 void loop() {
@@ -220,6 +302,9 @@ void loop() {
   if (readyForWeatherUpdate && ui.getUiState()->frameState == FIXED) {
     updateData(&display);
   }
+  
+  if (readyForDHTUpdate && ui.getUiState()->frameState == FIXED)
+    updateDHT();
 
   int remainingTimeBudget = ui.update();
 
@@ -227,10 +312,26 @@ void loop() {
     // You can do some work here
     // Don't do stuff if you are below your
     // time budget.
+    ArduinoOTA.handle();
     delay(remainingTimeBudget);
   }
 
 
+}
+
+void configModeCallback (WiFiManager *myWiFiManager) {
+  Serial.println("Entered config mode");
+  Serial.println(WiFi.softAPIP());
+  //if you used auto generated SSID, print it
+  Serial.println(myWiFiManager->getConfigPortalSSID());
+  display.clear();
+  display.setTextAlignment(TEXT_ALIGN_CENTER);
+  display.setFont(ArialMT_Plain_10);
+  display.drawString(64, 10, "Wifi Manager");
+  display.drawString(64, 20, "Please connect to AP");
+  display.drawString(64, 30, myWiFiManager->getConfigPortalSSID());
+  display.drawString(64, 40, "To setup Wifi Configuration");
+  display.display();
 }
 
 void drawProgress(OLEDDisplay *display, int percentage, String label) {
@@ -240,6 +341,15 @@ void drawProgress(OLEDDisplay *display, int percentage, String label) {
   display->drawString(64, 10, label);
   display->drawProgressBar(2, 28, 124, 10, percentage);
   display->display();
+}
+
+void drawOtaProgress(unsigned int progress, unsigned int total) {
+  display.clear();
+  display.setTextAlignment(TEXT_ALIGN_CENTER);
+  display.setFont(ArialMT_Plain_10);
+  display.drawString(64, 10, "OTA Update");
+  display.drawProgressBar(2, 28, 124, 12, progress / (total / 100));
+  display.display();
 }
 
 void updateData(OLEDDisplay *display) {
@@ -255,31 +365,123 @@ void updateData(OLEDDisplay *display) {
   forecastClient.setAllowedHours(allowedHours, sizeof(allowedHours));
   forecastClient.updateForecasts(forecasts, OPEN_WEATHER_MAP_APP_ID, OPEN_WEATHER_MAP_LOCATION_LAT, OPEN_WEATHER_MAP_LOCATION_LON, MAX_FORECASTS);
 
+  // Teleplot publish: OpenWeatherMap readings as floats with one decimal
+  Serial.print(">owm_temperature:"); Serial.println(String(currentWeather.temp, 1));
+  Serial.print(">owm_humidity:");  Serial.println(String(currentWeather.humidity, 1));
+
   readyForWeatherUpdate = false;
   drawProgress(display, 100, "Done...");
   delay(1000);
 }
 
+// Called every 1 minute
+void updateDHT() {
+  Serial.println("\n=== DHT22 Update Started ===");
+  Serial.print("Pin: ");
+  Serial.println(DHTPIN);
+  Serial.print("Sensor Type: ");
+  Serial.println(DHTTEXT);
+  
+  // Read humidity first (seems to be more stable)
+  Serial.println("Reading humidity...");
+  humidity = dht.readHumidity();
+  Serial.print("Raw Humidity: ");
+  Serial.println(humidity);
+  
+  // Read temperature
+  Serial.println("Reading temperature...");
+  temperature = dht.readTemperature(!IS_METRIC);
+  Serial.print("Raw Temperature: ");
+  Serial.println(temperature);
+  
+  // Check if readings are valid (NaN check)
+  if (isnan(humidity)) {
+    Serial.println("ERROR: Humidity reading is NaN!");
+    Serial.println("Possible causes:");
+    Serial.println("  - Sensor not connected or loose contact");
+    Serial.println("  - Pin D1 (GPIO5) not correctly configured");
+    Serial.println("  - Sensor defective");
+    Serial.println("  - Insufficient power to sensor");
+    Serial.println("  - Read too frequently (DHT22 needs ~2 seconds between reads)");
+  } else {
+    Serial.println("✓ Humidity reading is valid");
+  }
+  
+  if (isnan(temperature)) {
+    Serial.println("ERROR: Temperature reading is NaN!");
+    Serial.println("Possible causes:");
+    Serial.println("  - Sensor not connected or loose contact");
+    Serial.println("  - Pin D1 (GPIO5) not correctly configured");
+    Serial.println("  - Sensor defective");
+    Serial.println("  - Insufficient power to sensor");
+  } else {
+    Serial.println("✓ Temperature reading is valid");
+  }
+  
+  // Only format if values are valid
+  if (!isnan(temperature) && !isnan(humidity)) {
+    dtostrf(temperature, 4, 1, FormattedTemperature);
+    Serial.print("DHT22 Temperature: ");
+    Serial.print(FormattedTemperature);
+    Serial.println(IS_METRIC ? "°C": "°F");
+    
+    dtostrf(humidity, 4, 1, FormattedHumidity);
+    Serial.print("DHT22 Humidity: ");
+    Serial.print(FormattedHumidity);
+    Serial.println("%");
+    
+    // Teleplot format: >varName:1234 (values scaled by 10 to preserve one decimal)
+    // Use formatted strings to keep consistent display formatting
+    float ft = atof(FormattedTemperature);
+    float fh = atof(FormattedHumidity);
+    // Teleplot: send as float with one decimal (e.g. 23.4)
+    Serial.print(">temperature:"); Serial.println(String(ft, 1));
+    Serial.print(">humidity:");  Serial.println(String(fh, 1));
+  } else {
+    Serial.println("⚠ Skipping display formatting due to NaN values");
+    strcpy(FormattedTemperature, "N/A");
+    strcpy(FormattedHumidity, "N/A");
+  }
+  
+  Serial.println("=== DHT22 Update Completed ===");
+  readyForDHTUpdate = false;
+}
 
 
 void drawDateTime(OLEDDisplay *display, OLEDDisplayUiState* state, int16_t x, int16_t y) {
-  now = time(nullptr);
-  struct tm* timeInfo;
-  timeInfo = localtime(&now);
-  char buff[16];
-
+  char *dstAbbrev;
+  char time_str[11];
+  time_t now = dstAdjusted.time(&dstAbbrev);
+  struct tm * timeinfo = localtime (&now);
 
   display->setTextAlignment(TEXT_ALIGN_CENTER);
   display->setFont(ArialMT_Plain_10);
-  String date = WDAY_NAMES[timeInfo->tm_wday];
+  String date = ctime(&now);
+  date = date.substring(0,11) + String(1900+timeinfo->tm_year);
+  int textWidth = display->getStringWidth(date);
+  display->drawString(64 + x, 5 + y, date);
+  display->setFont(DSEG7_Classic_Bold_21);
+  display->setTextAlignment(TEXT_ALIGN_RIGHT);
 
-  sprintf_P(buff, PSTR("%s, %02d/%02d/%04d"), WDAY_NAMES[timeInfo->tm_wday].c_str(), timeInfo->tm_mday, timeInfo->tm_mon+1, timeInfo->tm_year + 1900);
-  display->drawString(64 + x, 5 + y, String(buff));
-  display->setFont(ArialMT_Plain_24);
+#ifdef STYLE_24HR
+  sprintf(time_str, "%02d:%02d:%02d\n",timeinfo->tm_hour, timeinfo->tm_min, timeinfo->tm_sec);
+  display->drawString(108 + x, 19 + y, time_str);
+#else
+  int hour = (timeinfo->tm_hour+11)%12+1;  // take care of noon and midnight
+  sprintf(time_str, "%2d:%02d:%02d\n",hour, timeinfo->tm_min, timeinfo->tm_sec);
+  display->drawString(101 + x, 19 + y, time_str);
+#endif
 
-  sprintf_P(buff, PSTR("%02d:%02d:%02d"), timeInfo->tm_hour, timeInfo->tm_min, timeInfo->tm_sec);
-  display->drawString(64 + x, 15 + y, String(buff));
   display->setTextAlignment(TEXT_ALIGN_LEFT);
+  display->setFont(ArialMT_Plain_10);
+#ifdef STYLE_24HR
+  sprintf(time_str, "%s", dstAbbrev);
+  display->drawString(108 + x, 27 + y, time_str);  // Known bug: Cuts off 4th character of timezone abbreviation
+#else
+  sprintf(time_str, "%s\n%s", dstAbbrev, timeinfo->tm_hour>=12?"pm":"am");
+  display->drawString(102 + x, 18 + y, time_str);
+#endif
+
 }
 
 void drawCurrentWeather(OLEDDisplay *display, OLEDDisplayUiState* state, int16_t x, int16_t y) {
@@ -320,10 +522,22 @@ void drawForecastDetails(OLEDDisplay *display, int x, int y, int dayIndex) {
   display->setTextAlignment(TEXT_ALIGN_LEFT);
 }
 
+void drawIndoor(OLEDDisplay *display, OLEDDisplayUiState* state, int16_t x, int16_t y) {
+  display->setTextAlignment(TEXT_ALIGN_CENTER);
+  display->setFont(ArialMT_Plain_10);
+  display->drawString(64 + x, 0, DHTTEXT " Indoor Sensor" );
+  display->setFont(ArialMT_Plain_16);
+  dtostrf(temperature,4, 1, FormattedTemperature);
+  display->drawString(64+x, 12, "Temp: " + String(FormattedTemperature) + (IS_METRIC ? "°C": "°F"));
+  dtostrf(humidity,4, 1, FormattedHumidity);
+  display->drawString(64+x, 30, "Humidity: " + String(FormattedHumidity) + "%");
+
+}
 void drawHeaderOverlay(OLEDDisplay *display, OLEDDisplayUiState* state) {
   now = time(nullptr);
   struct tm* timeInfo;
   timeInfo = localtime(&now);
+  
   char buff[14];
   sprintf_P(buff, PSTR("%02d:%02d"), timeInfo->tm_hour, timeInfo->tm_min);
 
@@ -340,4 +554,9 @@ void drawHeaderOverlay(OLEDDisplay *display, OLEDDisplayUiState* state) {
 void setReadyForWeatherUpdate() {
   Serial.println("Setting readyForUpdate to true");
   readyForWeatherUpdate = true;
+}
+
+void setReadyForDHTUpdate() {
+  Serial.println("Setting readyForDHTUpdate to true");
+  readyForDHTUpdate = true;
 }
