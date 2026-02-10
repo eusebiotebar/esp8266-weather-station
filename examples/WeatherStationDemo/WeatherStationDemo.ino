@@ -102,7 +102,7 @@ const int SDC_PIN = 4; //D4;
 // OpenWeatherMap Settings
 // Sign up here to get an API key:
 // https://docs.thingpulse.com/how-tos/openweathermap-key/
-String OPEN_WEATHER_MAP_APP_ID = "3bec5c63928fb399617fc58fa2b5c81a";
+String OPEN_WEATHER_MAP_APP_ID = "xxxxx";
 /*
 Use the OWM GeoCoder API to find lat/lon for your city: https://openweathermap.org/api/geocoding-api
 Or use any other geocoding service.
