@@ -366,8 +366,8 @@ void updateData(OLEDDisplay *display) {
   forecastClient.updateForecasts(forecasts, OPEN_WEATHER_MAP_APP_ID, OPEN_WEATHER_MAP_LOCATION_LAT, OPEN_WEATHER_MAP_LOCATION_LON, MAX_FORECASTS);
 
   // Teleplot publish: OpenWeatherMap readings as floats with one decimal
-  Serial.print(">owm_temperature:"); Serial.println(String(currentWeather.temp, 1));
-  Serial.print(">owm_humidity:");  Serial.println(String(currentWeather.humidity, 1));
+  Serial.print(">External_temp:"); Serial.println(String(currentWeather.temp, 1));
+  
 
   readyForWeatherUpdate = false;
   drawProgress(display, 100, "Done...");
@@ -458,8 +458,8 @@ void drawDateTime(OLEDDisplay *display, OLEDDisplayUiState* state, int16_t x, in
   display->setFont(ArialMT_Plain_10);
   String date = ctime(&now);
   date = date.substring(0,11) + String(1900+timeinfo->tm_year);
-  int textWidth = display->getStringWidth(date);
-  display->drawString(64 + x, 5 + y, date);
+  // int textWidth = display->getStringWidth(date);
+  // display->drawString(64 + x, 5 + y, date);
   display->setFont(DSEG7_Classic_Bold_21);
   display->setTextAlignment(TEXT_ALIGN_RIGHT);
 
